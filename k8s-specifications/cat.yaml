@@ -1,0 +1,248 @@
+# ==========================================
+# 0. 自动创建对应的命名空间 (防止因为没创建而报错)
+# ==========================================
+
+
+
+
+---
+# ==========================================
+# 1. 基础设施层 (mysql 命名空间)
+# ==========================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: db
+  name: db
+  namespace: mysql
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: db
+  template:
+    metadata:
+      labels:
+        app: db
+    spec:
+      containers:
+      - image: postgres:15-alpine
+        name: postgres
+        env:
+        - name: POSTGRES_USER
+          value: postgres
+        - name: POSTGRES_PASSWORD
+          value: postgres
+        ports:
+        - containerPort: 5432
+          name: postgres
+        volumeMounts:
+        - mountPath: /var/lib/postgresql/data
+          name: db-data
+      volumes:
+      - name: db-data
+        emptyDir: {} 
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: db
+  name: db
+  namespace: mysql
+spec:
+  type: ClusterIP
+  ports:
+  - name: "db-service"
+    port: 5432
+    targetPort: 5432
+  selector:
+    app: db
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: redis
+  name: redis
+  namespace: mysql
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      containers:
+      - image: redis:alpine
+        name: redis
+        ports:
+        - containerPort: 6379
+          name: redis
+        volumeMounts:
+        - mountPath: /data
+          name: redis-data
+      volumes:
+      - name: redis-data
+        emptyDir: {} 
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: redis
+  name: redis
+  namespace: mysql
+spec:
+  type: ClusterIP
+  ports:
+  - name: "redis-service"
+    port: 6379
+    targetPort: 6379
+  selector:
+    app: redis
+
+---
+# ==========================================
+# 2. 跨命名空间通信的“快捷方式”桥梁
+# ==========================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: db
+  namespace: test
+spec:
+  type: ExternalName
+  externalName: db.mysql.svc.cluster.local
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: test
+spec:
+  type: ExternalName
+  externalName: redis.mysql.svc.cluster.local
+
+---
+# ==========================================
+# 3. 业务逻辑层 (test 命名空间)
+# ==========================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: result
+  name: result
+  namespace: test
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: result
+  template:
+    metadata:
+      labels:
+        app: result
+    spec:
+      # 【新增】：为 result 组件添加拉取凭证
+      imagePullSecrets:
+      - name: tencent-registry-secret
+      containers:
+      # 注意：这里的 image 后续在 Jenkinsfile 里会被动态替换为你腾讯云的地址
+      - image: dockersamples/examplevotingapp_result
+        name: result
+        ports:
+        - containerPort: 80
+          name: result
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: result
+  name: result
+  namespace: test
+spec:
+  type: NodePort
+  ports:
+  - name: "result-service"
+    port: 8081
+    targetPort: 80
+    nodePort: 31001
+  selector:
+    app: result
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: vote
+  name: vote
+  namespace: test
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vote
+  template:
+    metadata:
+      labels:
+        app: vote
+    spec:
+      # 【新增】：为 vote 组件添加拉取凭证
+      imagePullSecrets:
+      - name: tencent-registry-secret
+      containers:
+      # 注意：这里的 image 后续在 Jenkinsfile 里会被动态替换为你腾讯云的地址
+      - image: dockersamples/examplevotingapp_vote
+        name: vote
+        ports:
+        - containerPort: 80
+          name: vote
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: vote
+  name: vote
+  namespace: test
+spec:
+  type: NodePort
+  ports:
+  - name: "vote-service"
+    port: 8080
+    targetPort: 80
+    nodePort: 31000
+  selector:
+    app: vote
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: worker
+  name: worker
+  namespace: test
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: worker
+  template:
+    metadata:
+      labels:
+        app: worker
+    spec:
+      # 【新增】：为 worker 组件添加拉取凭证
+      imagePullSecrets:
+      - name: tencent-registry-secret
+      containers:
+      # 注意：这里的 image 后续在 Jenkinsfile 里会被动态替换为你腾讯云的地址
+      - image: dockersamples/examplevotingapp_worker
+        name: worker

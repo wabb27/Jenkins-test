@@ -1,0 +1,91 @@
+pipeline {
+    agent {
+        // 使用 Kubernetes 插件动态拉起包含 Kaniko 和 Kubectl 的无头构建 Pod
+        kubernetes {
+            yaml '''
+            apiVersion: v1
+            kind: Pod
+            spec:
+              containers:
+              - name: kaniko
+                image: swr.cn-north-4.myhuaweicloud.com/ddn-k8s/gcr.io/kaniko-project/executor:debug
+                command: ["sleep"]
+                args: ["9999999"]
+              - name: kubectl
+                image: swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/bitnami/kubectl:latest
+                command: ["sleep"]
+                args: ["9999999"]
+            '''
+        }
+    }
+
+    environment {
+        // ==========================================
+        // 【重要修改】：将 your-namespace 换成你在腾讯云镜像仓库里创建的“命名空间”名称
+        // ==========================================
+        REGISTRY = "ccr.ccs.tencentyun.com/jenkins-test-1"
+        
+        // 自动使用 Jenkins 构建次数作为镜像的唯一版本号 (例如 v1, v2, v3...)
+        IMAGE_TAG = "v${BUILD_NUMBER}" 
+    }
+
+    stages {
+        stage('1. 拉取 GitHub 代码') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('2. 并行构建与推送 (Kaniko)') {
+            steps {
+                container('kaniko') {
+                    // 引用我们在 Jenkins 里创建的腾讯云凭据 ID
+                    withCredentials([usernamePassword(credentialsId: 'tencent-registry-creds', passwordVariable: 'DOCKER_PWD', usernameVariable: 'DOCKER_USER')]) {
+                        sh '''
+                            # 生成 Docker 登录凭证给 Kaniko 使用
+                            echo "{\\"auths\\":{\\"ccr.ccs.tencentyun.com\\":{\\"username\\":\\"${DOCKER_USER}\\",\\"password\\":\\"${DOCKER_PWD}\\"}}}" > /kaniko/.docker/config.json
+                            
+                            echo "🚀 开始构建并推送 Vote (Python 前端)..."
+                            /kaniko/executor --context `pwd`/vote --dockerfile `pwd`/vote/Dockerfile --destination ${REGISTRY}/vote:${IMAGE_TAG}
+                            
+                            echo "🚀 开始构建并推送 Result (Node.js 后端)..."
+                            /kaniko/executor --context `pwd`/result --dockerfile `pwd`/result/Dockerfile --destination ${REGISTRY}/result:${IMAGE_TAG}
+                            
+                            echo "🚀 开始构建并推送 Worker (.NET/Java 处理层)..."
+                            /kaniko/executor --context `pwd`/worker --dockerfile `pwd`/worker/Dockerfile --destination ${REGISTRY}/worker:${IMAGE_TAG}
+                        '''
+                    }
+                }
+            }
+        }
+
+        stage('3. 部署到 K8s (test 命名空间)') {
+            steps {
+                container('kubectl') {
+                    sh '''
+                        echo "📦 开始应用 K8s 部署文件..."
+                        # ==========================================
+                        # 【重要修改】：确认你存放刚才那份长长的 YAML 文件的路径和名字
+                        # 假设你把它保存在了 k8s-specifications/cat-dog-deploy.yaml
+                        # ==========================================
+                        kubectl apply -f k8s-specifications/cat.yaml
+                        
+                        echo "🔄 触发滚动更新，将 test 命名空间的业务容器替换为刚打包好的新版本..."
+                        
+                        # 替换 Vote 镜像
+                        kubectl set image deployment/vote vote=${REGISTRY}/vote:${IMAGE_TAG} -n test
+                        
+                        # 替换 Result 镜像
+                        kubectl set image deployment/result result=${REGISTRY}/result:${IMAGE_TAG} -n test
+                        
+                        # 替换 Worker 镜像
+                        kubectl set image deployment/worker worker=${REGISTRY}/worker:${IMAGE_TAG} -n test
+                        
+                        echo "✅ 部署指令下发完毕！查看当前 Pod 状态："
+                        kubectl get pods -n test
+                    '''
+                }
+            }
+        }
+    }
+}
